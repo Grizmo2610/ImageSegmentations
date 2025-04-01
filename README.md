@@ -92,9 +92,10 @@ Once the model is trained, you can use it to perform image segmentation on new i
 python script.py --image data/image.png --model models/unet_v1.pth --save --path output.png
 ```
 In this command:
-- `--input` specifies the image you want to segment.
+- `--image` specifies the image you want to segment.
 - `--model` specifies the path to the pre-trained U-Net model (e.g., `unet_v1.pth`).
-- `--output` specifies the file name where the segmented image will be saved.
+- `--save` Flag value to check want to save or not
+- `--path` specifies the file name where the segmented result will be saved.
 
 The output will be a segmented image with regions clearly identified based on the model’s predictions.
 
