@@ -89,7 +89,7 @@ You can monitor the training process through visualizations of training and vali
 ### 🔍 Running Inference
 Once the model is trained, you can use it to perform image segmentation on new images. To run inference, use the following command:
 ```bash
-python script.py --input data/image.png --model models/unet_v1.pth --output output.png
+python script.py --image data/image.png --model models/unet_v1.pth --save --path output.png
 ```
 In this command:
 - `--input` specifies the image you want to segment.
