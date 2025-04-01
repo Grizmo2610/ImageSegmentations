@@ -137,15 +137,35 @@ def image_visualize(model: nn.Module,
     fig, axes = plt.subplots(2, 2, figsize=(10, 5))
     titles = ["Original Image", "Merged Binary Mask", "Overlay", "Segmented Image"]
     images = [image_np, binary_mask, overlay, img]
+    
+    if save:
+        if path.find('/') == -1:
+            path += '/'
+        directory = os.path.dirname(path).strip()
+        if directory =='':
+            directory = './'
+        if not os.path.exists(directory):
+            os.makedirs(directory)
+        i = 1
+        while os.path.exists(os.path.join(directory, f'output{i}')):
+            i += 1
+        all_result_path = os.path.join(directory, f'output{i}')
+        os.makedirs(all_result_path)
+    
     for ax, img, title in zip(axes.flat, images, titles):
         img = cv2.resize(img, image_size, interpolation=cv2.INTER_LINEAR_EXACT)
         ax.imshow(img, cmap='gray' if title == "Merged Binary Mask" else None)
         ax.set_title(title)
+        if save:
+            save_path = os.path.join(all_result_path, f'{title}.jpg')
+            cv2.imwrite(save_path, cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+            logger.info(f"Saved \"{title}\" to {save_path}")
         ax.axis("off")
     gc.collect()
     if save:
-        plt.savefig(path)
-        logger.info(f"Saved segmentation result to {path}")
+        save_path = os.path.join(all_result_path, 'figurge.jpg')
+        plt.savefig(save_path)
+        logger.info(f"Saved segmentation result to {save_path}")        
     plt.show()
 
 # Process camera feed
@@ -198,15 +218,17 @@ def main() -> None:
     parser.add_argument('--model', type=str, default='models/unet_v1.pth', help="Path to trained model.")
     parser.add_argument('--alpha', type=float, default=0.5, help="Transparency for the overlay.")
     parser.add_argument('--save', action='store_true', help="Save the result if set")
-    parser.add_argument('--path', type=str, default='output.png', help="Path to save the output image.")
+    parser.add_argument('--path', type=str, default='data', help="Path to folder save the output images.")
     parser.add_argument('-v', '--verbose', default='INFO', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], help="Logging verbosity level.")
     parser.add_argument('-l', '--logfile', default=f'logs/{int(time.time())}.log', type=str, help="Log file.")
     parser.add_argument('-d', '--device', choices=['cpu', 'cuda'], default='cpu', help="Device to run the model on.")
     args = parser.parse_args()
     
     logfile_directory = os.path.dirname(args.logfile)
+    
     if not os.path.exists(logfile_directory):
         os.makedirs(logfile_directory)
+        
     logger = setup_logging(args.verbose, args.logfile)
     logger.info(f"Using device: {args.device}")
     try:

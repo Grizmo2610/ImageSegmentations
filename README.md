@@ -89,13 +89,13 @@ You can monitor the training process through visualizations of training and vali
 ### 🔍 Running Inference
 Once the model is trained, you can use it to perform image segmentation on new images. To run inference, use the following command:
 ```bash
-python script.py --image data/image.png --model models/unet_v1.pth --save --path output.png
+python script.py --image data/image.png --model models/unet_v1.pth --save --path "data"
 ```
 In this command:
 - `--image` specifies the image you want to segment.
 - `--model` specifies the path to the pre-trained U-Net model (e.g., `unet_v1.pth`).
 - `--save` Flag value to check want to save or not
-- `--path` specifies the file name where the segmented result will be saved.
+- `--path` specifies the folder name where the segmented results will be saved.
 
 The output will be a segmented image with regions clearly identified based on the model’s predictions.
 
