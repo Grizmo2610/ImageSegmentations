@@ -103,7 +103,13 @@ def generate_overlay(image: Image.Image, output_mask: np.ndarray, alpha: float) 
         raise
 
 # Visualize image segmentation
-def image_visualize(model: nn.Module, device: torch.device, image_path: str, alpha: float, logger: logging.Logger) -> None:
+def image_visualize(model: nn.Module, 
+                    device: torch.device, 
+                    image_path: str, 
+                    alpha: float, 
+                    logger: logging.Logger,
+                    save: bool = False,
+                    path: str = 'output.png') -> None:
     """
     Visualize the segmentation results of a given image.
 
@@ -113,6 +119,11 @@ def image_visualize(model: nn.Module, device: torch.device, image_path: str, alp
         image_path (str): Path to the image file.
         alpha (float): Transparency for the overlay.
         logger (logging.Logger): Logger instance to record information.
+        save (bool, optional): Whether to save the output image. Defaults to False.
+        path (str, optional): Path to save the output image if save is True. Defaults to 'output.png'.
+
+    Returns:
+        None
     """
     logger.info(f"Starting segmentation visualization for image: {image_path}")
     input_tensor, image_size = process_image(image_path, logger)
@@ -132,6 +143,9 @@ def image_visualize(model: nn.Module, device: torch.device, image_path: str, alp
         ax.set_title(title)
         ax.axis("off")
     gc.collect()
+    if save:
+        plt.savefig(path)
+        logger.info(f"Saved segmentation result to {path}")
     plt.show()
 
 # Process camera feed
@@ -182,10 +196,12 @@ def main() -> None:
     parser.add_argument('--image', type=str, help="Path to the image file for segmentation.")
     parser.add_argument('--camera', action='store_true', help="Use real-time camera segmentation.")
     parser.add_argument('--model', type=str, default='models/unet_v1.pth', help="Path to trained model.")
+    parser.add_argument('--alpha', type=float, default=0.5, help="Transparency for the overlay.")
+    parser.add_argument('--save', action='store_true', help="Save the result if set")
+    parser.add_argument('--path', type=str, default='output.png', help="Path to save the output image.")
     parser.add_argument('-v', '--verbose', default='INFO', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], help="Logging verbosity level.")
     parser.add_argument('-l', '--logfile', default=f'logs/{int(time.time())}.log', type=str, help="Log file.")
     parser.add_argument('-d', '--device', choices=['cpu', 'cuda'], default='cpu', help="Device to run the model on.")
-    parser.add_argument('--alpha', type=float, default=0.5, help="Transparency for the overlay.")
     args = parser.parse_args()
     
     logfile_directory = os.path.dirname(args.logfile)
@@ -202,7 +218,7 @@ def main() -> None:
     if args.camera:
         using_camera(model, args.device, args.alpha, logger)
     elif args.image:
-        image_visualize(model, args.device, args.image, args.alpha, logger)
+        image_visualize(model, args.device, args.image, args.alpha, logger, args.save, args.path)
     else:
         logger.error("Please provide an image path or use the camera option.")
 
