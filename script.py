@@ -88,8 +88,8 @@ def generate_overlay(image: Image.Image, output_mask: np.ndarray, alpha: float) 
         tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]: The original image, binary mask, overlay, and segmented image.
     """
     try:
-        NUM_CLASSES = 91
-        colors = np.random.randint(0, 255, size=(NUM_CLASSES, 3), dtype=np.uint8)
+        # NUM_CLASSES = 91
+        # colors = np.random.randint(0, 255, size=(NUM_CLASSES, 3), dtype=np.uint8)
         # mask_color = colors[output_mask]
         IMAGE_SIZE = (224, 224)
         image_np = np.array(image.resize(IMAGE_SIZE))
@@ -161,9 +161,11 @@ def image_visualize(model: nn.Module,
             cv2.imwrite(save_path, cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
             logger.info(f"Saved \"{title}\" to {save_path}")
         ax.axis("off")
-    gc.collect()
+        
+    logger.info(f"{gc.collect()} Objects have been released")
+    
     if save:
-        save_path = os.path.join(all_result_path, 'figurge.jpg')
+        save_path = os.path.join(all_result_path, 'figure.jpg')
         plt.savefig(save_path)
         logger.info(f"Saved segmentation result to {save_path}")        
     plt.show()
@@ -222,6 +224,11 @@ def main() -> None:
     parser.add_argument('-v', '--verbose', default='INFO', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], help="Logging verbosity level.")
     parser.add_argument('-l', '--logfile', default=f'logs/{int(time.time())}.log', type=str, help="Log file.")
     parser.add_argument('-d', '--device', choices=['cpu', 'cuda'], default='cpu', help="Device to run the model on.")
+    
+    if len(os.sys.argv) == 1:
+        parser.print_help()
+        return
+    
     args = parser.parse_args()
     
     logfile_directory = os.path.dirname(args.logfile)
