@@ -55,6 +55,8 @@ out/
 
 
 lab.py
+lab.ipynb
+
 logs/
 data/
 test/

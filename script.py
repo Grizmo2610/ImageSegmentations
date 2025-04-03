@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 
-import os
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -9,6 +8,7 @@ import cv2
 from PIL import Image
 
 import time
+import os
 import gc
 import argparse
 import logging
@@ -55,7 +55,7 @@ def process_image(source: str | np.ndarray, logger: logging.Logger) -> tuple[tor
 
     Returns:
         tuple[torch.Tensor, tuple[int, int]]: Processed tensor ready for model input and the original image size.
-    
+
     Raises:
         ValueError: If the input type for source is invalid.
     """
@@ -103,10 +103,10 @@ def generate_overlay(image: Image.Image, output_mask: np.ndarray, alpha: float) 
         raise
 
 # Visualize image segmentation
-def image_visualize(model: nn.Module, 
-                    device: torch.device, 
-                    image_path: str, 
-                    alpha: float, 
+def image_visualize(model: nn.Module,
+                    device: torch.device,
+                    image_path: str,
+                    alpha: float,
                     logger: logging.Logger,
                     save: bool = False,
                     path: str = 'output.png') -> None:
@@ -137,7 +137,7 @@ def image_visualize(model: nn.Module,
     fig, axes = plt.subplots(2, 2, figsize=(10, 5))
     titles = ["Original Image", "Merged Binary Mask", "Overlay", "Segmented Image"]
     images = [image_np, binary_mask, overlay, img]
-    
+
     if save:
         if path.find('/') == -1:
             path += '/'
@@ -151,7 +151,7 @@ def image_visualize(model: nn.Module,
             i += 1
         all_result_path = os.path.join(directory, f'output{i}')
         os.makedirs(all_result_path)
-    
+
     for ax, img, title in zip(axes.flat, images, titles):
         img = cv2.resize(img, image_size, interpolation=cv2.INTER_LINEAR_EXACT)
         ax.imshow(img, cmap='gray' if title == "Merged Binary Mask" else None)
@@ -161,13 +161,13 @@ def image_visualize(model: nn.Module,
             cv2.imwrite(save_path, cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
             logger.info(f"Saved \"{title}\" to {save_path}")
         ax.axis("off")
-        
+
     logger.info(f"{gc.collect()} Objects have been released")
-    
+
     if save:
         save_path = os.path.join(all_result_path, 'figure.jpg')
         plt.savefig(save_path)
-        logger.info(f"Saved segmentation result to {save_path}")        
+        logger.info(f"Saved segmentation result to {save_path}")
     plt.show()
 
 # Process camera feed
@@ -224,18 +224,18 @@ def main() -> None:
     parser.add_argument('-v', '--verbose', default='INFO', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], help="Logging verbosity level.")
     parser.add_argument('-l', '--logfile', default=f'logs/{int(time.time())}.log', type=str, help="Log file.")
     parser.add_argument('-d', '--device', choices=['cpu', 'cuda'], default='cpu', help="Device to run the model on.")
-    
+
     if len(os.sys.argv) == 1:
         parser.print_help()
         return
-    
+
     args = parser.parse_args()
-    
+
     logfile_directory = os.path.dirname(args.logfile)
-    
+
     if not os.path.exists(logfile_directory):
         os.makedirs(logfile_directory)
-        
+
     logger = setup_logging(args.verbose, args.logfile)
     logger.info(f"Using device: {args.device}")
     try:

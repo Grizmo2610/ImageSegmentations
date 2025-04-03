@@ -1,7 +1,9 @@
 pycocotools==2.0.8
 opencv-python==4.10.0.84
 numpy==1.26.4
+Pillow==11.1.0
 tqdm==4.67.1
+matplotlib==3.10.0
 albumentations==2.0.4
 torch==2.6.0
 torchvision==0.21.0
