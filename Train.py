@@ -47,7 +47,7 @@ if not os.path.exists(MODEL_FOLDER):
 IMAGE_SIZE = 224
 NUM_WORKER = os.cpu_count()
 learning_rate=1e-4
-epochs = 1
+epochs = 5
 best_val_loss = float("inf")
 patience = 3
 counter = 0
@@ -74,7 +74,7 @@ class COCOSegmentation(Dataset):
         img_id = self.ids[index]
         ann_ids = self.coco.getAnnIds(imgIds=img_id)
         annotations = self.coco.loadAnns(ann_ids)
-
+        
         # Load image
         img_info = self.coco.loadImgs(img_id)[0]
         img_path = os.path.join(self.root, img_info["file_name"])
@@ -99,10 +99,18 @@ class COCOSegmentation(Dataset):
 # Augmentations
 train_transform = A.Compose([
     A.Resize(IMAGE_SIZE, IMAGE_SIZE),
+    A.RandomResizedCrop(IMAGE_SIZE, IMAGE_SIZE, scale=(0.8, 1.0), ratio=(0.75, 1.33), p=0.5),
     A.HorizontalFlip(p=0.5),
+    A.VerticalFlip(p=0.2),
+    A.RandomRotate90(p=0.5),
+    A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.1, rotate_limit=15, p=0.5),
+    A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.5),
+    A.GaussNoise(var_limit=(10.0, 50.0), p=0.3),
+    A.MotionBlur(blur_limit=3, p=0.2),
     A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
     ToTensorV2(),
 ])
+
 
 val_transform = A.Compose([
     A.Resize(IMAGE_SIZE, IMAGE_SIZE),
@@ -112,15 +120,15 @@ val_transform = A.Compose([
 
 # Load datasets
 print(f'{"=" * 25}Loading Training dataset{"=" * 25}')
-train_dataset = COCOSegmentation(os.path.join(FOLDER_PATH, "train2017"),
+train_dataset = COCOSegmentation(os.path.join(FOLDER_PATH, "train2017"), 
                                  os.path.join(FOLDER_PATH, "annotations/instances_train2017.json"),
                                  transform=train_transform)
 train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKER)
 
 
 print(f'{"=" * 25}Loading Validation dataset{"=" * 25}')
-val_dataset = COCOSegmentation(os.path.join(FOLDER_PATH, "val2017"),
-                                 os.path.join(FOLDER_PATH, "annotations/instances_val2017.json"),
+val_dataset = COCOSegmentation(os.path.join(FOLDER_PATH, "val2017"), 
+                                 os.path.join(FOLDER_PATH, "annotations/instances_val2017.json"), 
                                transform=val_transform)
 
 val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKER)
@@ -153,13 +161,13 @@ class UNet(nn.Module):
 
         self.up4 = nn.ConvTranspose2d(1024, 512, kernel_size=2, stride=2)
         self.dec4 = DoubleConv(1024, 512)
-
+        
         self.up3 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
         self.dec3 = DoubleConv(512, 256)
-
+        
         self.up2 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
         self.dec2 = DoubleConv(256, 128)
-
+        
         self.up1 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
         self.dec1 = DoubleConv(128, 64)
 
@@ -198,7 +206,7 @@ if len(epoch_models) < 1:
     latest_model = 0
 else:
     latest_model = max(epoch_models, key=lambda x: x[0])[1]
-
+  
 print(latest_model)
 
 # %%
@@ -211,7 +219,10 @@ print(f'Model using: {model_path}')
 
 # %%
 if os.path.exists(model_path):
-    model.load_state_dict(torch.load(model_path, weights_only=True))
+    if torch.cuda.is_available():
+        model.load_state_dict(torch.load(model_path, weights_only=True))
+    else:
+        model.load_state_dict(torch.load(model_path, weights_only=True, map_location=device))
     model.to(device)
     print(f"Model loaded successfully on {device}")
 else:
@@ -272,12 +283,12 @@ def evaluate_model(model, val_loader, criterion, device):
     avg_dice = np.mean(dice_scores)
 
     print(f"\nEvaluation - Loss: {avg_loss:.4f}, IoU: {avg_iou:.4f}, Dice: {avg_dice:.4f}")
-    return avg_loss, avg_iou, avg_dice
+    return avg_loss, avg_iou, avg_dice  
 
 # %%
 if torch.cuda.is_available() and os.path.exists(model_path):
     avg_loss, avg_iou, avg_dice = evaluate_model(model, val_loader, criterion, device)
-    print(f"Evaluation - Loss: {avg_loss:.4f}, IoU: {avg_iou:.4f}, Dice: {avg_dice:.4f}")
+    print(f"Evaluation - Loss: {avg_loss:.4f}, IoU: {avg_iou:.4f}, Dice: {avg_dice:.4f}")  
 
 # %%
 def train(model, train_loader, optimizer, criterion, device):
@@ -292,7 +303,7 @@ def train(model, train_loader, optimizer, criterion, device):
         loss = criterion(outputs, masks)
         loss.backward()
         optimizer.step()
-
+        
         running_loss += loss.item()
         loop.set_postfix(loss=loss.item())
 
@@ -302,7 +313,7 @@ def validate(model, val_loader, criterion, device):
     model.eval()
     total_loss = 0.0
     loop = tqdm(val_loader, desc="Validating", leave=False)
-
+    
     with torch.no_grad():
         for images, masks in loop:
             images, masks = images.to(device), masks.to(device)
@@ -323,28 +334,29 @@ for epoch in range(epochs):
 
     epoch_time = time.time() - start_time
     print(f"Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f} - Time: {epoch_time:.2f}s - Release: {gc.collect()} objects")
-
+    
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.ipc_collect()
-
+        
     if val_loss < best_val_loss:
         best_val_loss = val_loss
         counter = 0
-        torch.save(model.state_dict(), os.path.join(FOLDER_PATH, model_path))
+        torch.save(model.state_dict(), os.path.join(MODEL_FOLDER, 'best_unet.pth'))
+        print(f'New Best model Saved at {os.path.join(MODEL_FOLDER, "best_unet.pth")}')
     else:
         counter += 1
         print(f"Early Stopping Counter: {counter}/{patience}")
-
+    
     saved_models = [f for f in os.listdir(MODEL_FOLDER) if re.match(r'unet_epoch_\d+\.pth', f)]
     max_epoch = 0
     if saved_models:
         max_epoch = max(int(re.search(r'unet_epoch_(\d+)\.pth', f).group(1)) for f in saved_models)
-
+    
     next_epoch = max_epoch + 1
-    torch.save(model.state_dict(), os.path.join(FOLDER_PATH, f"unet_epoch_{next_epoch}.pth"))
+    torch.save(model.state_dict(), os.path.join(MODEL_FOLDER, f"unet_epoch_{next_epoch}.pth"))
     print(f"Saved Model: unet_epoch_{next_epoch}.pth")
-
+    
     if counter >= patience:
         print("Early stopping triggered! Training stopped.")
         break
