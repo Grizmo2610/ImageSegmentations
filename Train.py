@@ -119,14 +119,14 @@ val_transform = A.Compose([
 ])
 
 # Load datasets
-print(f'{"=" * 25}Loading Training dataset{"=" * 25}')
+print("=" * 25 + "Loading Training dataset" + "=" * 25)
 train_dataset = COCOSegmentation(os.path.join(FOLDER_PATH, "train2017"), 
                                  os.path.join(FOLDER_PATH, "annotations/instances_train2017.json"),
                                  transform=train_transform)
 train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKER)
 
 
-print(f'{"=" * 25}Loading Validation dataset{"=" * 25}')
+print("=" * 25 + "Loading Validation dataset" + "=" * 25)
 val_dataset = COCOSegmentation(os.path.join(FOLDER_PATH, "val2017"), 
                                  os.path.join(FOLDER_PATH, "annotations/instances_val2017.json"), 
                                transform=val_transform)
@@ -258,7 +258,42 @@ def calculate_dice(pred_mask, true_mask, num_classes=91):
 
     return np.nanmean(dice_scores)
 
-def evaluate_model(model, val_loader, criterion, device):
+# %%
+def train(model, train_loader, optimizer, criterion, device):
+    model.train()
+    running_loss = 0.0
+    iou_scores, dice_scores = [], []  # Khởi tạo danh sách lưu trữ giá trị IoU và Dice
+
+    loop = tqdm(train_loader, desc="Training", leave=False)
+    for images, masks in loop:
+        images, masks = images.to(device), masks.to(device)
+        optimizer.zero_grad()
+        outputs = model(images)
+        loss = criterion(outputs, masks)
+        loss.backward()
+        optimizer.step()
+
+        running_loss += loss.item()
+
+        # Tính toán IoU và Dice cho từng batch
+        preds = torch.argmax(outputs, dim=1)
+        iou = calculate_iou(preds, masks)
+        dice = calculate_dice(preds, masks)
+
+        iou_scores.append(iou)
+        dice_scores.append(dice)
+
+        loop.set_postfix(loss=loss.item())
+
+    avg_loss = running_loss / len(train_loader)
+    avg_iou = np.mean(iou_scores)
+    avg_dice = np.mean(dice_scores)
+
+    print(f"\nTraining - Loss: {avg_loss:.4f}, IoU: {avg_iou:.4f}, Dice: {avg_dice:.4f}")
+    return avg_loss, avg_iou, avg_dice
+
+
+def validate(model, val_loader, criterion, device):
     model.eval()
     iou_scores, dice_scores, val_losses = [], [], []
 
@@ -283,85 +318,55 @@ def evaluate_model(model, val_loader, criterion, device):
     avg_dice = np.mean(dice_scores)
 
     print(f"\nEvaluation - Loss: {avg_loss:.4f}, IoU: {avg_iou:.4f}, Dice: {avg_dice:.4f}")
-    return avg_loss, avg_iou, avg_dice  
+    return avg_loss, avg_iou, avg_dice
 
 # %%
 if torch.cuda.is_available() and os.path.exists(model_path):
-    avg_loss, avg_iou, avg_dice = evaluate_model(model, val_loader, criterion, device)
+    avg_loss, avg_iou, avg_dice = validate(model, val_loader, criterion, device)
+    best_val_loss = avg_loss
+    best_val_dice = avg_dice
     print(f"Evaluation - Loss: {avg_loss:.4f}, IoU: {avg_iou:.4f}, Dice: {avg_dice:.4f}")  
 
 # %%
-def train(model, train_loader, optimizer, criterion, device):
-    model.train()
-    running_loss = 0.0
-    loop = tqdm(train_loader, desc="Training", leave=False)
-
-    for images, masks in loop:
-        images, masks = images.to(device), masks.to(device)
-        optimizer.zero_grad()
-        outputs = model(images)
-        loss = criterion(outputs, masks)
-        loss.backward()
-        optimizer.step()
-        
-        running_loss += loss.item()
-        loop.set_postfix(loss=loss.item())
-
-    return running_loss / len(train_loader)
-
-def validate(model, val_loader, criterion, device):
-    model.eval()
-    total_loss = 0.0
-    loop = tqdm(val_loader, desc="Validating", leave=False)
-    
-    with torch.no_grad():
-        for images, masks in loop:
-            images, masks = images.to(device), masks.to(device)
-            outputs = model(images)
-            loss = criterion(outputs, masks)
-            total_loss += loss.item()
-            loop.set_postfix(loss=loss.item())
-
-    return total_loss / len(val_loader)
-
-# %%
 for epoch in range(epochs):
-    print('=' * 25 + f'Epoch {epoch + 1}/ {epochs}' + '=' * 25)
+    print('=' * 25 + f'Epoch {epoch + 1}/{epochs}' + '=' * 25)
     start_time = time.time()
 
-    train_loss = train(model, train_loader, optimizer, criterion, device)
-    val_loss = validate(model, val_loader, criterion, device)
+    train_loss, train_iou, train_dice = train(model, train_loader, optimizer, criterion, device)
+    val_loss, val_iou, val_dice = validate(model, val_loader, criterion, device)
 
     epoch_time = time.time() - start_time
-    print(f"Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f} - Time: {epoch_time:.2f}s - Release: {gc.collect()} objects")
-    
+    print(f"Epoch {epoch + 1}/{epochs} - "
+          f"Train Loss: {train_loss:.4f}, Train IoU: {train_iou:.4f}, Train Dice: {train_dice:.4f}, "
+          f"Val Loss: {val_loss:.4f}, Val IoU: {val_iou:.4f}, Val Dice: {val_dice:.4f} - "
+          f"Time: {epoch_time:.2f}s")
+
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-        torch.cuda.ipc_collect()
-        
-    if val_loss < best_val_loss:
-        best_val_loss = val_loss
+
+    if val_dice > best_val_dice:
+        best_val_dice = val_dice
         counter = 0
         torch.save(model.state_dict(), os.path.join(MODEL_FOLDER, 'best_unet.pth'))
-        print(f'New Best model Saved at {os.path.join(MODEL_FOLDER, "best_unet.pth")}')
+        print(f'New best model saved with Dice: {val_dice:.4f} → {os.path.join(MODEL_FOLDER, "best_unet.pth")}')
     else:
         counter += 1
         print(f"Early Stopping Counter: {counter}/{patience}")
-    
+
     saved_models = [f for f in os.listdir(MODEL_FOLDER) if re.match(r'unet_epoch_\d+\.pth', f)]
-    max_epoch = 0
-    if saved_models:
-        max_epoch = max(int(re.search(r'unet_epoch_(\d+)\.pth', f).group(1)) for f in saved_models)
-    
+    max_epoch = max([int(re.search(r'unet_epoch_(\d+)\.pth', f).group(1)) for f in saved_models], default=0)
     next_epoch = max_epoch + 1
     torch.save(model.state_dict(), os.path.join(MODEL_FOLDER, f"unet_epoch_{next_epoch}.pth"))
     print(f"Saved Model: unet_epoch_{next_epoch}.pth")
-    
+
     if counter >= patience:
         print("Early stopping triggered! Training stopped.")
         break
 
+
 # %%
 if torch.cuda.is_available():
     model.eval()
-    evaluate_model(model, val_loader, criterion, device)
+    validate(model, val_loader, criterion, device)
+
+
