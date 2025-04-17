@@ -217,7 +217,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Image segmentation with U-Net model.")
     parser.add_argument('--image', type=str, help="Path to the image file for segmentation.")
     parser.add_argument('--camera', action='store_true', help="Use real-time camera segmentation.")
-    parser.add_argument('--model', type=str, default='models/best_unet.pth', help="Path to trained model.")
+    parser.add_argument('--model', type=str, default='models/best_model.pth', help="Path to trained model.")
     parser.add_argument('--alpha', type=float, default=0.5, help="Transparency for the overlay.")
     parser.add_argument('--save', action='store_true', help="Save the result if set")
     parser.add_argument('--path', type=str, default='data', help="Path to folder save the output images.")
