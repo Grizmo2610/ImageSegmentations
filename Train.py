@@ -5,6 +5,7 @@ import gc
 import re
 import os
 import cv2
+import json
 import time
 import shutil
 import numpy as np
@@ -34,7 +35,7 @@ if not os.path.exists(MODEL_FOLDER):
 IMAGE_SIZE = 224
 NUM_WORKER = os.cpu_count()
 learning_rate=1e-3
-epochs = 3
+epochs = 6
 patience = 3
 counter = 0
 
@@ -49,38 +50,101 @@ print(f'Device using: {device}')
 print(f'CPU Count: {NUM_WORKER}')
 
 # %%
-class COCOSegmentation(Dataset):
-    def __init__(self, root, annotation_file, transform=None):
-        self.root = root
-        self.coco = COCO(annotation_file)
-        self.ids = list(self.coco.imgs.keys())
+def clean_json(json_path, image_root, save_path=None):
+    with open(json_path, 'r') as f:
+        data = json.load(f)
+    
+    valid_images = []
+    valid_ids = set()
+    for img in tqdm(data['images']):
+        img_url = img['coco_url']
+        img_name = os.path.basename(img_url)
+        img_path = os.path.join(image_root, img_name)
+        
+        if os.path.exists(img_path):
+            valid_images.append(img)
+            valid_ids.add(img['id'])
+    valid_annotations = [ann for ann in data['annotations'] if ann['image_id'] in valid_ids]
+
+    cleaned_data = {
+        "images": valid_images,
+        "annotations": valid_annotations,
+        "categories": data["categories"]
+    }
+    print(f'From {len(data["images"])} to {len(cleaned_data["images"])}')
+    if save_path is None:
+        save_path = 'cleaned.json'
+    with open(save_path, 'w') as f:
+        json.dump(cleaned_data, f)
+
+    print(f"Saved cleaned file to {save_path}")
+    return cleaned_data
+clean = clean_json('/kaggle/input/lvis-v1/lvis_v1_val/lvis_v1_val.json', '/kaggle/input/lvis-v1/lvis_v1_val/val2017')
+
+# %%
+class CustomDataset(Dataset):
+    def __init__(self, coco_root, coco_ann, lvis_root, lvis_ann, transform=None):
+        self.coco = COCO(coco_ann)
+        self.lvis = COCO(lvis_ann)
+
+        self.coco_ids = list(self.coco.imgs.keys())
+        self.lvis_ids = list(self.lvis.imgs.keys())
+        self.ids = self.coco_ids + self.lvis_ids
+        self.sources = ["coco"] * len(self.coco_ids) + ["lvis"] * len(self.lvis_ids)
+
+        self.roots = {"coco": coco_root, "lvis": lvis_root}
         self.transform = transform
 
-    def __getitem__(self, index):
-        img_id = self.ids[index]
-        ann_ids = self.coco.getAnnIds(imgIds=img_id)
-        annotations = self.coco.loadAnns(ann_ids)
-        
-        # Load image
-        img_info = self.coco.loadImgs(img_id)[0]
-        img_path = os.path.join(self.root, img_info["file_name"])
-        image = cv2.imread(img_path)
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        # Tạo danh sách unique category_id
+        all_cat_ids = sorted(set(self.coco.getCatIds()) | set(self.lvis.getCatIds()))
+        self.cat_id_map = {cat_id: i + 1 for i, cat_id in enumerate(all_cat_ids)}
+        self.index = -1
 
-        # Load segmentation mask
-        mask = np.zeros((img_info["height"], img_info["width"]), dtype=np.uint8)
+    def __len__(self):
+        return len(self.ids)
+
+    def get_img_path(self, source: str, img_info):
+        if source == "coco":
+            img_path = os.path.join(self.roots[source], img_info["file_name"])
+        else:  # Assuming 'source' is 'lvis'
+            img_url = img_info.get('coco_url', img_info.get('flickr_url', ''))
+            img_name = os.path.basename(img_url)
+            img_path = os.path.join(self.roots[source], img_name)
+        return img_path
+
+    def __getitem__(self, index):
+        source = self.sources[index]
+        img_id = self.ids[index]
+
+        coco_api = self.coco if source == "coco" else self.lvis
+        img_info = coco_api.loadImgs(img_id)[0]
+        ann_ids = coco_api.getAnnIds(imgIds=img_id)
+        annotations = coco_api.loadAnns(ann_ids)
+        
+        img_path = self.get_img_path(source, img_info)
+        image = cv2.imread(img_path)
+        if image is None:
+            print(f'Error reading at: {img_path}')
+            return self.__getitem__(self.index)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            
+        mask = np.zeros((img_info["height"], img_info["width"]), dtype=np.uint16)
         for ann in annotations:
-            mask = np.maximum(mask, self.coco.annToMask(ann))
+            ann_mask = coco_api.annToMask(ann)
+            mask = np.maximum(mask, ann_mask)
 
         # Apply transforms
         if self.transform:
             augmented = self.transform(image=image, mask=mask)
             image, mask = augmented["image"], augmented["mask"]
-
+            
+        self.index = index
         return image, mask.long()
-
-    def __len__(self):
-        return len(self.ids)
+    def get_num_classes(self):
+        cat_ids_coco = self.coco.getCatIds() if self.coco else []
+        cat_ids_lvis = self.lvis.getCatIds() if self.lvis else []
+        all_cat_ids = sorted(set(cat_ids_coco) | set(cat_ids_lvis))
+        return len(all_cat_ids) + 1
 
 # Augmentations
 train_transform = A.Compose([
@@ -106,16 +170,20 @@ val_transform = A.Compose([
 
 # Load datasets
 print("=" * 25 + "Loading Training dataset" + "=" * 25)
-train_dataset = COCOSegmentation(os.path.join(FOLDER_PATH, "train2017"), 
-                                 os.path.join(FOLDER_PATH, "annotations/instances_train2017.json"),
-                                 transform=train_transform)
+train_dataset = CustomDataset(os.path.join(FOLDER_PATH, "train2017"), 
+                              os.path.join(FOLDER_PATH, "annotations/instances_train2017.json"),
+                              '/kaggle/input/lvis-v1/train2017/train2017',
+                              '/kaggle/input/lvis-v1/lvis_v1_train.json/lvis_v1_train.json',
+                              transform=train_transform)
 train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKER)
 
 
 print("=" * 25 + "Loading Validation dataset" + "=" * 25)
-val_dataset = COCOSegmentation(os.path.join(FOLDER_PATH, "val2017"), 
-                                 os.path.join(FOLDER_PATH, "annotations/instances_val2017.json"), 
-                               transform=val_transform)
+val_dataset = CustomDataset(os.path.join(FOLDER_PATH, "val2017"), 
+                            os.path.join(FOLDER_PATH, "annotations/instances_val2017.json"), 
+                            '/kaggle/input/lvis-v1/lvis_v1_val/val2017',
+                            'cleaned.json',
+                            transform=val_transform)
 
 val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKER)
 
@@ -238,7 +306,7 @@ model = UNet().to(device)
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 best_unet = os.path.join(MODEL_FOLDER,'best_model.pth')
-lr_scheduler = StepLR(optimizer, step_size=3, gamma=0.1)
+lr_scheduler = StepLR(optimizer, step_size=3, gamma=0.5)
 
 # %%
 paths = os.listdir(MODEL_FOLDER)
@@ -248,7 +316,7 @@ if len(epoch_models) < 1:
     latest_model = 0
 else:
     latest_model = max(epoch_models, key=lambda x: x[0])[1]
-using_best = True
+using_best = False
 if using_best:
     model_path = best_unet
 else:
@@ -268,21 +336,6 @@ else:
     print(f"Error: Model path '{model_path}' does not exist.")
 
 # %%
-def calculate_iou(pred_mask, true_mask, num_classes=91):
-    iou_scores = []
-    for cls in range(1, num_classes):
-        pred_cls = (pred_mask == cls).float()
-        true_cls = (true_mask == cls).float()
-
-        intersection = (pred_cls * true_cls).sum()
-        union = pred_cls.sum() + true_cls.sum() - intersection
-
-        if union == 0:
-            continue  # bỏ qua class không xuất hiện
-        iou_scores.append((intersection / union).item())
-
-    return np.mean(iou_scores) if iou_scores else 0.0
-
 def calculate_dice(pred_mask, true_mask, num_classes=91):
     dice_scores = []
     for cls in range(1, num_classes):
@@ -306,8 +359,7 @@ def train(model: UNet,
           device: torch.device):
     model.train()
     
-    iou_scores, dice_scores, running_loss = [], [], []
-    min_iou, max_iou = 1, 0
+    dice_scores, running_loss = [], []
     min_dice, max_dice = 1, 0
 
     loop = tqdm(train_loader, desc="Training", leave=False)
@@ -322,18 +374,11 @@ def train(model: UNet,
         running_loss.append(loss.item())
 
         preds = torch.argmax(outputs, dim=1)
-        iou = calculate_iou(preds, masks)
         dice = calculate_dice(preds, masks)
-
-        iou_scores.append(iou)
         dice_scores.append(dice)
 
         min_loss = float(min(running_loss))
         max_loss = float(max(running_loss))
-        
-        min_iou = float(min(iou, min_iou))
-        max_iou = float(max(iou, max_iou))
-        
         
         min_dice = float(min(dice, min_dice))
         max_dice = float(max(dice, max_dice))
@@ -341,14 +386,11 @@ def train(model: UNet,
         loop.set_postfix(loss=loss.item(),
                          min_loss = min_loss,
                          max_loss = max_loss,
-                         min_iou = min_iou,
-                         max_iou = max_iou,
-                         iou = iou,
                          min_dice = min_dice,
                          max_dice = max_dice,
                          dice = dice)
 
-    return np.array(running_loss), np.array(iou_scores), np.array(dice_scores)
+    return np.array(running_loss), np.array(dice_scores)
 
 def validate(model: UNet, 
              val_loader: DataLoader, 
@@ -356,7 +398,7 @@ def validate(model: UNet,
              device: torch.device):
     
     model.eval()
-    iou_scores, dice_scores, val_losses = [], [], []
+    dice_scores, val_losses = [], [], []
 
     loop = tqdm(val_loader, desc="Evaluating", leave=False)
     for images, masks in loop:
@@ -368,49 +410,45 @@ def validate(model: UNet,
         loss = criterion(outputs, masks)
         val_losses.append(loss.item())
 
-        iou = calculate_iou(preds, masks)
         dice = calculate_dice(preds, masks)
 
-        iou_scores.append(iou)
         dice_scores.append(dice)
 
         loop.set_postfix(loss=loss.item())
 
-    return np.array(val_losses), np.array(iou_scores), np.array(dice_scores)
+    return np.array(val_losses), np.array(dice_scores)
 
 # %%
-if torch.cuda.is_available():
-    val_loss, val_iou, val_dice = validate(model, val_loader, criterion, device)
+if torch.cuda.is_available() and os.path.exists(model_path):
+    val_loss, val_dice = validate(model, val_loader, criterion, device)
     val_loss_mean = np.mean(val_loss)
-    val_iou_mean = np.mean(val_iou)
+    # val_iou_mean = np.mean(val_iou)
     val_dice_mean = np.mean(val_dice)
     
     best_dice_mean = val_dice_mean
 
     print(f"Val Loss: {val_loss_mean:.4f} - "
-          f"Val IOU: {val_iou_mean:.4f} - "
           f"Val Dice: {val_dice_mean:.4f}")
 else:
-    best_dice_mean = 0.80
+    best_dice_mean = 0.5279
 
 # %%
-best_dice_mean
+print(f'Dice: {best_dice_mean:.4f}')
+print(f'Object Released: {gc.collect()}')
 
 # %%
 train_loss_history = []
-train_iou_history = []
 train_dice_history = []
 val_loss_history = []
-val_iou_history = []
 val_dice_history = []
 for epoch in range(epochs):
     print('=' * 25 + f'Epoch {epoch + 1}/ {epochs}' + '=' * 25)
     start_time = time.time()
 
     # Train the model and get the metrics
-    train_loss, train_iou, train_dice = train(model, train_loader, optimizer, criterion, device)
+    train_loss, train_dice = train(model, train_loader, optimizer, criterion, device)
     # Validate the model and get the metrics
-    val_loss, val_iou, val_dice = validate(model, val_loader, criterion, device)
+    val_loss, val_dice = validate(model, val_loader, criterion, device)
 
     epoch_time = time.time() - start_time
     
@@ -419,10 +457,6 @@ for epoch in range(epochs):
     train_loss_max = np.max(train_loss)
     train_loss_mean = np.mean(train_loss)
 
-    train_iou_min = np.min(train_iou)
-    train_iou_max = np.max(train_iou)
-    train_iou_mean = np.mean(train_iou)
-
     train_dice_min = np.min(train_dice)
     train_dice_max = np.max(train_dice)
     train_dice_mean = np.mean(train_dice)
@@ -430,11 +464,7 @@ for epoch in range(epochs):
     val_loss_min = np.min(val_loss)
     val_loss_max = np.max(val_loss)
     val_loss_mean = np.mean(val_loss)
-
-    val_iou_min = np.min(val_iou)
-    val_iou_max = np.max(val_iou)
-    val_iou_mean = np.mean(val_iou)
-
+    
     val_dice_min = np.min(val_dice)
     val_dice_max = np.max(val_dice)
     val_dice_mean = np.mean(val_dice)
@@ -442,8 +472,6 @@ for epoch in range(epochs):
     print(f"Epoch {epoch+1}/{epochs} - "
           f"Train Loss: {train_loss_mean:.4f} (min: {train_loss_min:.4f}, max: {train_loss_max:.4f}), "
           f"Val Loss: {val_loss_mean:.4f} (min: {val_loss_min:.4f}, max: {val_loss_max:.4f}) - "
-          f"Train IOU: {train_iou_mean:.4f} (min: {train_iou_min:.4f}, max: {train_iou_max:.4f}), "
-          f"Val IOU: {val_iou_mean:.4f} (min: {val_iou_min:.4f}, max: {val_iou_max:.4f}) - "
           f"Train Dice: {train_dice_mean:.4f} (min: {train_dice_min:.4f}, max: {train_dice_max:.4f}), "
           f"Val Dice: {val_dice_mean:.4f} (min: {val_dice_min:.4f}, max: {val_dice_max:.4f}) - "
           f"Time: {epoch_time:.2f}s - Release: {gc.collect()} objects")
@@ -456,7 +484,7 @@ for epoch in range(epochs):
         best_dice_mean = val_dice_mean
         counter = 0
         torch.save(model.state_dict(), os.path.join(MODEL_FOLDER, 'best_model.pth'))
-        print(f"Saved new Best Model! -  Loss: {val_loss_mean:.4f}, Dice {val_dice_mean:.4f}, IoU {val_iou_mean:.4f}")
+        print(f"Saved new Best Model! -  Loss: {val_loss_mean:.4f}, Dice {val_dice_mean:.4f}")
     else:
         counter += 1
         print(f"Early Stopping Counter: {counter}/{patience}")
@@ -477,10 +505,8 @@ for epoch in range(epochs):
 
     # Append the metrics to the history lists
     train_loss_history.append(np.mean(train_loss))
-    train_iou_history.append(np.mean(train_iou))
     train_dice_history.append(np.mean(train_dice))
     val_loss_history.append(np.mean(val_loss))
-    val_iou_history.append(np.mean(val_iou))
     val_dice_history.append(np.mean(val_dice))
     
     lr_scheduler.step()
@@ -491,7 +517,7 @@ r = list(range(1, epochs + 1))
 plt.figure(figsize=(18, 5))
 
 # Loss
-plt.subplot(1, 3, 1)
+plt.subplot(1, 2, 1)
 plt.plot(r, train_loss_history, label='Train Loss')
 plt.plot(r, val_loss_history, label='Val Loss')
 plt.xlabel('Epoch')
@@ -500,18 +526,8 @@ plt.title('Loss over Epochs')
 plt.legend()
 plt.grid(True)
 
-# IoU
-plt.subplot(1, 3, 2)
-plt.plot(r, train_iou_history, label='Train IoU')
-plt.plot(r, val_iou_history, label='Val IoU')
-plt.xlabel('Epoch')
-plt.ylabel('IoU')
-plt.title('IoU over Epochs')
-plt.legend()
-plt.grid(True)
-
 # Dice
-plt.subplot(1, 3, 3)
+plt.subplot(1, 2, 2)
 plt.plot(r, train_dice_history, label='Train Dice')
 plt.plot(r, val_dice_history, label='Val Dice')
 plt.xlabel('Epoch')
@@ -522,3 +538,5 @@ plt.grid(True)
 
 plt.tight_layout()
 plt.show()
+
+
