@@ -7,7 +7,6 @@ import os
 import cv2
 import json
 import time
-import shutil
 import numpy as np
 from PIL import Image
 from tqdm import tqdm
@@ -18,12 +17,29 @@ from albumentations.pytorch import ToTensorV2
 
 import torch
 import torch.nn as nn
+import logging
 
 import torch.optim as optim
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import StepLR
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as transforms
+
+# %%
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+
+file_handler = logging.FileHandler('logfile.log')
+console_handler = logging.StreamHandler()
+
+formatter = logging.Formatter('%(message)s')
+file_handler.setFormatter(formatter)
+console_handler.setFormatter(formatter)
+
+logger.handlers.clear()
+
+logger.addHandler(file_handler)
+logger.addHandler(console_handler)
 
 # %%
 data_path = '/kaggle/input/coco-2017-dataset'
@@ -46,8 +62,8 @@ else:
     BATCH_SIZE = 128
     device = torch.device("cpu")
 
-print(f'Device using: {device}')
-print(f'CPU Count: {NUM_WORKER}')
+logger.info(f'Device using: {device}')
+logger.info(f'CPU Count: {NUM_WORKER}')
 
 # %%
 def clean_json(json_path, image_root, save_path=None):
@@ -71,13 +87,13 @@ def clean_json(json_path, image_root, save_path=None):
         "annotations": valid_annotations,
         "categories": data["categories"]
     }
-    print(f'From {len(data["images"])} to {len(cleaned_data["images"])}')
+    logger.info(f'From {len(data["images"])} to {len(cleaned_data["images"])}')
     if save_path is None:
         save_path = 'cleaned.json'
     with open(save_path, 'w') as f:
         json.dump(cleaned_data, f)
 
-    print(f"Saved cleaned file to {save_path}")
+    logger.info(f"Saved cleaned file to {save_path}")
     return cleaned_data
 clean = clean_json('/kaggle/input/lvis-v1/lvis_v1_val/lvis_v1_val.json', '/kaggle/input/lvis-v1/lvis_v1_val/val2017')
 
@@ -124,7 +140,7 @@ class CustomDataset(Dataset):
         img_path = self.get_img_path(source, img_info)
         image = cv2.imread(img_path)
         if image is None:
-            print(f'Error reading at: {img_path}')
+            logger.error(f'Error reading at: {img_path}')
             return self.__getitem__(self.index)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             
@@ -133,7 +149,7 @@ class CustomDataset(Dataset):
             ann_mask = coco_api.annToMask(ann)
             mask = np.maximum(mask, ann_mask)
 
-        # Apply transforms
+
         if self.transform:
             augmented = self.transform(image=image, mask=mask)
             image, mask = augmented["image"], augmented["mask"]
@@ -169,7 +185,7 @@ val_transform = A.Compose([
 ])
 
 # Load datasets
-print("=" * 25 + "Loading Training dataset" + "=" * 25)
+logger.info("=" * 25 + "Loading Training dataset" + "=" * 25)
 train_dataset = CustomDataset(os.path.join(FOLDER_PATH, "train2017"), 
                               os.path.join(FOLDER_PATH, "annotations/instances_train2017.json"),
                               '/kaggle/input/lvis-v1/train2017/train2017',
@@ -178,7 +194,7 @@ train_dataset = CustomDataset(os.path.join(FOLDER_PATH, "train2017"),
 train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKER)
 
 
-print("=" * 25 + "Loading Validation dataset" + "=" * 25)
+logger.info("=" * 25 + "Loading Validation dataset" + "=" * 25)
 val_dataset = CustomDataset(os.path.join(FOLDER_PATH, "val2017"), 
                             os.path.join(FOLDER_PATH, "annotations/instances_val2017.json"), 
                             '/kaggle/input/lvis-v1/lvis_v1_val/val2017',
@@ -316,13 +332,13 @@ if len(epoch_models) < 1:
     latest_model = 0
 else:
     latest_model = max(epoch_models, key=lambda x: x[0])[1]
-using_best = False
+using_best = True
 if using_best:
     model_path = best_unet
 else:
     model_path = os.path.join(MODEL_FOLDER, str(latest_model))
-print(f'Lastest model: {latest_model}')
-print(f'Model using: {model_path}')
+logger.info(f'Lastest model: {latest_model}')
+logger.info(f'Model using: {model_path}')
 
 # %%
 if os.path.exists(model_path):
@@ -331,9 +347,9 @@ if os.path.exists(model_path):
     else:
         model.load_state_dict(torch.load(model_path, weights_only=True, map_location=device))
     model.to(device)
-    print(f"Model loaded successfully on {device}")
+    logger.info(f"Model loaded successfully on {device}")
 else:
-    print(f"Error: Model path '{model_path}' does not exist.")
+    logger.info(f"Error: Model path '{model_path}' does not exist.")
 
 # %%
 def calculate_dice(pred_mask, true_mask, num_classes=91):
@@ -395,10 +411,9 @@ def train(model: UNet,
 def validate(model: UNet, 
              val_loader: DataLoader, 
              criterion: nn.CrossEntropyLoss, 
-             device: torch.device):
-    
+             device: torch.device):  
     model.eval()
-    dice_scores, val_losses = [], [], []
+    dice_scores, val_losses = [], []
 
     loop = tqdm(val_loader, desc="Evaluating", leave=False)
     for images, masks in loop:
@@ -408,10 +423,9 @@ def validate(model: UNet,
         preds = torch.argmax(outputs, dim=1)
 
         loss = criterion(outputs, masks)
-        val_losses.append(loss.item())
-
         dice = calculate_dice(preds, masks)
-
+        
+        val_losses.append(loss.item())
         dice_scores.append(dice)
 
         loop.set_postfix(loss=loss.item())
@@ -422,19 +436,18 @@ def validate(model: UNet,
 if torch.cuda.is_available() and os.path.exists(model_path):
     val_loss, val_dice = validate(model, val_loader, criterion, device)
     val_loss_mean = np.mean(val_loss)
-    # val_iou_mean = np.mean(val_iou)
     val_dice_mean = np.mean(val_dice)
     
     best_dice_mean = val_dice_mean
 
-    print(f"Val Loss: {val_loss_mean:.4f} - "
+    logger.info(f"Val Loss: {val_loss_mean:.4f} - "
           f"Val Dice: {val_dice_mean:.4f}")
 else:
     best_dice_mean = 0.5279
 
 # %%
-print(f'Dice: {best_dice_mean:.4f}')
-print(f'Object Released: {gc.collect()}')
+logger.info(f'Dice: {best_dice_mean:.4f}')
+logger.info(f'Object Released: {gc.collect()}')
 
 # %%
 train_loss_history = []
@@ -442,7 +455,7 @@ train_dice_history = []
 val_loss_history = []
 val_dice_history = []
 for epoch in range(epochs):
-    print('=' * 25 + f'Epoch {epoch + 1}/ {epochs}' + '=' * 25)
+    logger.info('=' * 25 + f'Epoch {epoch + 1}/ {epochs}' + '=' * 25)
     start_time = time.time()
 
     # Train the model and get the metrics
@@ -469,7 +482,7 @@ for epoch in range(epochs):
     val_dice_max = np.max(val_dice)
     val_dice_mean = np.mean(val_dice)
     
-    print(f"Epoch {epoch+1}/{epochs} - "
+    logger.info(f"Epoch {epoch+1}/{epochs} - "
           f"Train Loss: {train_loss_mean:.4f} (min: {train_loss_min:.4f}, max: {train_loss_max:.4f}), "
           f"Val Loss: {val_loss_mean:.4f} (min: {val_loss_min:.4f}, max: {val_loss_max:.4f}) - "
           f"Train Dice: {train_dice_mean:.4f} (min: {train_dice_min:.4f}, max: {train_dice_max:.4f}), "
@@ -484,10 +497,10 @@ for epoch in range(epochs):
         best_dice_mean = val_dice_mean
         counter = 0
         torch.save(model.state_dict(), os.path.join(MODEL_FOLDER, 'best_model.pth'))
-        print(f"Saved new Best Model! -  Loss: {val_loss_mean:.4f}, Dice {val_dice_mean:.4f}")
+        logger.info(f"Saved new Best Model! -  Loss: {val_loss_mean:.4f}, Dice {val_dice_mean:.4f}")
     else:
         counter += 1
-        print(f"Early Stopping Counter: {counter}/{patience}")
+        logger.info(f"Early Stopping Counter: {counter}/{patience}")
     
     # Save the model with the current epoch
     saved_models = [f for f in os.listdir(MODEL_FOLDER) if re.match(r'model_epoch_\d+\.pth', f)]
@@ -497,10 +510,10 @@ for epoch in range(epochs):
     
     next_epoch = max_epoch + 1
     torch.save(model.state_dict(), os.path.join(MODEL_FOLDER, f"model_epoch_{next_epoch}.pth"))
-    print(f"Saved Model: model_epoch_{next_epoch}.pth")
+    logger.info(f"Saved Model: model_epoch_{next_epoch}.pth")
     
     if counter >= patience:
-        print("Early stopping triggered! Training stopped.")
+        logger.info("Early stopping triggered! Training stopped.")
         break
 
     # Append the metrics to the history lists
@@ -510,6 +523,20 @@ for epoch in range(epochs):
     val_dice_history.append(np.mean(val_dice))
     
     lr_scheduler.step()
+
+# %%
+logger.info(f'Dice: {best_dice_mean:.4f}')
+logger.info(f'Object Released: {gc.collect()}')
+
+# %%
+val_loss, val_dice = validate(model, val_loader, criterion, device)
+val_loss_mean = np.mean(val_loss)
+val_dice_mean = np.mean(val_dice)
+
+best_dice_mean = val_dice_mean
+
+logger.info(f"Val Loss: {val_loss_mean:.4f} - ", 
+      f"Val Dice: {val_dice_mean:.4f}")
 
 # %%
 r = list(range(1, epochs + 1))
@@ -537,6 +564,7 @@ plt.legend()
 plt.grid(True)
 
 plt.tight_layout()
+plt.savefig('history.png')
 plt.show()
 
 
