@@ -9,6 +9,7 @@ import json
 import time
 import numpy as np
 from PIL import Image
+import logging
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
@@ -17,15 +18,16 @@ from albumentations.pytorch import ToTensorV2
 
 import torch
 import torch.nn as nn
-import logging
-
 import torch.optim as optim
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import StepLR
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, ConcatDataset
 import torchvision.transforms as transforms
 
 # %%
+if os.path.exists('logfile.log'):
+    os.remove('logfile.log')
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
@@ -95,24 +97,38 @@ def clean_json(json_path, image_root, save_path=None):
 
     logger.info(f"Saved cleaned file to {save_path}")
     return cleaned_data
-clean = clean_json('/kaggle/input/lvis-v1/lvis_v1_val/lvis_v1_val.json', '/kaggle/input/lvis-v1/lvis_v1_val/val2017')
+clean = False
+if clean:
+    clean = clean_json('/kaggle/input/lvis-v1/lvis_v1_val/lvis_v1_val.json', '/kaggle/input/lvis-v1/lvis_v1_val/val2017')
 
 # %%
 class CustomDataset(Dataset):
     def __init__(self, coco_root, coco_ann, lvis_root, lvis_ann, transform=None):
-        self.coco = COCO(coco_ann)
-        self.lvis = COCO(lvis_ann)
-
-        self.coco_ids = list(self.coco.imgs.keys())
-        self.lvis_ids = list(self.lvis.imgs.keys())
-        self.ids = self.coco_ids + self.lvis_ids
-        self.sources = ["coco"] * len(self.coco_ids) + ["lvis"] * len(self.lvis_ids)
+        self.coco = None
+        self.lvis = None
+        if coco_root:
+            self.coco = COCO(coco_ann)
+            self.coco_ids = list(self.coco.imgs.keys())
+        if lvis_root:
+            self.lvis = COCO(lvis_ann)
+            self.lvis_ids = list(self.lvis.imgs.keys())
+        
+        if coco_root and lvis_root:
+            self.ids = self.coco_ids + self.lvis_ids
+            self.sources = ["coco"] * len(self.coco_ids) + ["lvis"] * len(self.lvis_ids)
+            all_cat_ids = sorted(set(self.coco.getCatIds()) | set(self.lvis.getCatIds()))
+        elif coco_root is None:
+            self.ids = self.lvis_ids
+            self.sources = ["lvis"] * len(self.lvis_ids)
+            all_cat_ids = sorted(set(self.lvis.getCatIds()))
+        elif lvis_root is None:
+            self.ids = self.coco_ids
+            self.sources = ["coco"] * len(self.coco_ids)
+            all_cat_ids = sorted(set(self.coco.getCatIds()))
 
         self.roots = {"coco": coco_root, "lvis": lvis_root}
         self.transform = transform
 
-        # Tạo danh sách unique category_id
-        all_cat_ids = sorted(set(self.coco.getCatIds()) | set(self.lvis.getCatIds()))
         self.cat_id_map = {cat_id: i + 1 for i, cat_id in enumerate(all_cat_ids)}
         self.index = -1
 
@@ -185,22 +201,32 @@ val_transform = A.Compose([
 ])
 
 # Load datasets
-logger.info("=" * 25 + "Loading Training dataset" + "=" * 25)
-train_dataset = CustomDataset(os.path.join(FOLDER_PATH, "train2017"), 
-                              os.path.join(FOLDER_PATH, "annotations/instances_train2017.json"),
-                              '/kaggle/input/lvis-v1/train2017/train2017',
-                              '/kaggle/input/lvis-v1/lvis_v1_train.json/lvis_v1_train.json',
-                              transform=train_transform)
+coco_train = CustomDataset(
+    coco_root=os.path.join(FOLDER_PATH, "train2017"),
+    coco_ann=os.path.join(FOLDER_PATH, "annotations/instances_train2017.json"),
+    lvis_root='/kaggle/input/lvis-v1/train2017/train2017',
+    lvis_ann='/kaggle/input/lvis-v1/lvis_v1_train.json/lvis_v1_train.json',
+    transform=train_transform
+)
+
+lvis_val_train = CustomDataset(
+    coco_root=None,
+    coco_ann=None,
+    lvis_root='/kaggle/input/lvis-v1/lvis_v1_val/val2017',
+    lvis_ann='cleaned.json',
+    transform=train_transform
+)
+
+train_dataset = ConcatDataset([coco_train, lvis_val_train])
 train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKER)
 
-
-logger.info("=" * 25 + "Loading Validation dataset" + "=" * 25)
-val_dataset = CustomDataset(os.path.join(FOLDER_PATH, "val2017"), 
-                            os.path.join(FOLDER_PATH, "annotations/instances_val2017.json"), 
-                            '/kaggle/input/lvis-v1/lvis_v1_val/val2017',
-                            'cleaned.json',
-                            transform=val_transform)
-
+val_dataset = CustomDataset(
+    coco_root=os.path.join(FOLDER_PATH, "val2017"), 
+    coco_ann=os.path.join(FOLDER_PATH, "annotations/instances_val2017.json"), 
+    lvis_root=None,
+    lvis_ann=None,
+    transform=val_transform
+)
 val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKER)
 
 # %%
@@ -367,7 +393,6 @@ def calculate_dice(pred_mask, true_mask, num_classes=91):
 
     return np.mean(dice_scores) if dice_scores else 0.0
 
-# %%
 def train(model: UNet, 
           train_loader: DataLoader, 
           optimizer: optim.Adam, 
@@ -443,7 +468,7 @@ if torch.cuda.is_available() and os.path.exists(model_path):
     logger.info(f"Val Loss: {val_loss_mean:.4f} - "
           f"Val Dice: {val_dice_mean:.4f}")
 else:
-    best_dice_mean = 0.5279
+    best_dice_mean = 0.6351
 
 # %%
 logger.info(f'Dice: {best_dice_mean:.4f}')
@@ -512,16 +537,16 @@ for epoch in range(epochs):
     torch.save(model.state_dict(), os.path.join(MODEL_FOLDER, f"model_epoch_{next_epoch}.pth"))
     logger.info(f"Saved Model: model_epoch_{next_epoch}.pth")
     
-    if counter >= patience:
-        logger.info("Early stopping triggered! Training stopped.")
-        break
-
     # Append the metrics to the history lists
     train_loss_history.append(np.mean(train_loss))
     train_dice_history.append(np.mean(train_dice))
     val_loss_history.append(np.mean(val_loss))
     val_dice_history.append(np.mean(val_dice))
-    
+
+    if counter >= patience:
+        logger.info("Early stopping triggered! Training stopped.")
+        break
+
     lr_scheduler.step()
 
 # %%
@@ -533,7 +558,7 @@ val_loss, val_dice = validate(model, val_loader, criterion, device)
 val_loss_mean = np.mean(val_loss)
 val_dice_mean = np.mean(val_dice)
 
-best_dice_mean = val_dice_mean
+best_dice_mean = max(best_dice_mean, val_dice_mean)
 
 logger.info(f"Val Loss: {val_loss_mean:.4f} - ", 
       f"Val Dice: {val_dice_mean:.4f}")
@@ -566,5 +591,3 @@ plt.grid(True)
 plt.tight_layout()
 plt.savefig('history.png')
 plt.show()
-
-
